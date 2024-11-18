@@ -39,7 +39,7 @@ async function getKey() {
 }
 
 async function generateHmac(key: webcrypto.CryptoKey, payloadStr: string) {
-  const digest = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(payloadStr));
+  const digest = await webcrypto.subtle.sign('HMAC', key, new TextEncoder().encode(payloadStr));
   return Array.from(new Uint8Array(digest))
     .map(b => b.toString(16).padStart(2, '0')).join('');
 };
