@@ -125,7 +125,8 @@ async function pollFeed(agent: AtpAgent, redis: Redis, key: webcrypto.CryptoKey,
 
       if (embedImages.length) {
         const [picked, ...rest] = embedImages;
-        payload.secondaryURI = picked;
+        payload.secondaryURI = payload.uri;
+        payload.uri = picked;
         if (embedText) {
           payload.annotation += `\nEmbed text:\n"${embedText}"\n`;
         }
