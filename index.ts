@@ -1,4 +1,4 @@
-import { AtpAgent, ComAtprotoServerCreateSession } from '@atproto/api';
+import { AtpAgent, ComAtprotoServerCreateSession, AtpSessionEvent, AtpSessionData } from '@atproto/api';
 import { input } from '@inquirer/prompts';
 import { Redis } from 'ioredis';
 import { webcrypto } from 'node:crypto';
@@ -40,7 +40,7 @@ async function login(agent: AtpAgent, redis: Redis): Promise<string> {
       return handle;
     } catch (e) {
       console.error('resumeSession failed!', e);
-      await redis.del(REDIS_SESSION_NAME)
+      await redis.del(REDIS_SESSION_NAME);
     }
   }
 
@@ -71,7 +71,7 @@ async function pollFeed(agent: AtpAgent, redis: Redis, key: webcrypto.CryptoKey,
   }
 
   if (process.env.BSKYHLTE_DUMP_FEED) {
-    // purposefully don't await; best effort
+    // purposefully don't await (best effort)
     writeFile("last_feed.json", JSON.stringify(allData, null, 2));
   }
 
@@ -162,13 +162,28 @@ async function pollFeed(agent: AtpAgent, redis: Redis, key: webcrypto.CryptoKey,
 const waitMins = (headers: { [key: string]: string }): number =>
   Number(((Number.parseInt(headers['ratelimit-reset']) * 1000) - Number(new Date())) / 1000 / 60);
 
+async function agentSessionWasRefreshed(redis: Redis, event: AtpSessionEvent, session: AtpSessionData | undefined) {
+  if (event === 'update') {
+    if (!session) {
+      console.error(`Updated event but no session!`);
+      return;
+    }
+
+    await redis.set(REDIS_SESSION_NAME, JSON.stringify(session));
+    console.log('Session updated & saved');
+  }
+}
+
 async function main() {
-  const key = await getKey();
-  const redis = new Redis(process.env.REDIS_URL);
-  const agent = new AtpAgent({ service: 'https://bsky.social' });
   let pollFeedHandle: NodeJS.Timeout;
   let resolver = (_) => { };
   let handle: string;
+  const key = await getKey();
+  const redis = new Redis(process.env.REDIS_URL);
+  const agent = new AtpAgent({
+    service: 'https://bsky.social',
+    persistSession: agentSessionWasRefreshed.bind(null, redis),
+  });
 
   function shutdown() {
     console.log('Ending...');
