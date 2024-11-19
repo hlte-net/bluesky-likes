@@ -7,7 +7,7 @@ import { getKey, hlteFetch, HLTEPostPayload } from './hlte';
 import logger from './logger';
 logger('bluesky-likes');
 
-const POLLING_FREQ_SECONDS = 67;
+const POLLING_FREQ_SECONDS = Number.parseInt(process.env.BSKYHLTE_POLLING_FREQ_SECONDS ?? '67');
 const REDIS_SET_NAME = "hlte:bluesky-likes:processed-uris";
 const REDIS_SESSION_NAME = "hlte:bluesky-likes:saved-session";
 
@@ -31,6 +31,7 @@ async function login(agent: AtpAgent, redis: Redis): Promise<string> {
     }
   }
 
+  console.log(`Authenticating as @${process.env.BLUESKY_IDENT}...`);
   const savedSession = await redis.get(REDIS_SESSION_NAME);
   if (savedSession) {
     try {
@@ -55,11 +56,18 @@ async function pollFeed(agent: AtpAgent, redis: Redis, key: webcrypto.CryptoKey,
   let cursor = undefined;
   while (true) {
     const { data } = await agent.getActorLikes({ actor, limit: 100, cursor });
+
     if (!data.feed.length) {
       break;
     }
+
+    if (data.feed.length < 100) {
+      console.debug(`Page had less (${data.feed.length}) than expected!`);
+    }
+
     allData = allData.concat(data.feed);
     cursor = data.cursor;
+    console.debug(`Getting next page at cursor ${cursor}`);
   }
 
   if (process.env.BSKYHLTE_DUMP_FEED) {
@@ -94,40 +102,43 @@ async function pollFeed(agent: AtpAgent, redis: Redis, key: webcrypto.CryptoKey,
           value: { createdAt, text },
         },
       } = embed;
-      embedRecords.push(`"${text}" -- @${handle}, ${displayName} at ${createdAt}`);
+      embedRecords.push(`"${text}" -- @${handle} / ${displayName} at ${createdAt}`);
     }
 
     return {
       uri, handle, displayName, text: (record as any).text,
       embed, embedImages, embedText, embedRecords,
+      createdAt: (record as any).createdAt,
       userUrl: `https://bsky.app/profile/${handle}/post/${urlId}`,
     }
   });
 
+  console.debug(`Full likes feed has ${allData.length} entries`);
+
   let newEntries = 0;
   for (const entry of xformed) {
     if (!(await redis.sismember(REDIS_SET_NAME, entry.uri))) {
-      const { userUrl, text, handle, displayName,
+      const { userUrl, text, handle, displayName, createdAt,
         embedImages, embedText, embedRecords } = entry;
       const payload: HLTEPostPayload = {
         uri: userUrl,
-        data: `${text}\n\n-- @${handle}, ${displayName}`,
-        annotation: `(from bluesky-likes at ${new Date().toLocaleString()})`,
+        data: `${text}\n\n-- @${handle} / ${displayName}`,
+        annotation: `(from bluesky-likes, original post made at ${createdAt})\n`,
       };
 
       if (embedImages.length) {
         const [picked, ...rest] = embedImages;
         payload.secondaryURI = picked;
         if (embedText) {
-          payload.annotation += `\nEmbed text:\n"${embedText}"\n\n`;
+          payload.annotation += `\nEmbed text:\n"${embedText}"\n`;
         }
         if (rest.length) {
-          payload.annotation += `\nRemaining image embeds:\n${rest.join('\n')}`;
+          payload.annotation += `\nRemaining image embeds:\n${rest.join('\n')}\n`;
         }
       }
 
       if (embedRecords.length) {
-        payload.annotation += `Reposting:\n\n${embedRecords.join('\n---\n')}`;
+        payload.annotation += `\nReposting:\n\n${embedRecords.join('\n---\n')}\n`;
       }
 
       const response = await hlteFetch(process.env.HLTE_USER_URL, key, payload);
@@ -171,7 +182,7 @@ async function main() {
     handle = await login(agent, redis);
   } catch (e) {
     if (e.status === 429 && e.error === 'RateLimitExceeded') {
-      console.log(`Login rate limit reached! Wait at least ${waitMins(e.headers).toFixed(0)} minutes before trying again.`);
+      console.error(`Login rate limit reached! Wait at least ${waitMins(e.headers).toFixed(0)} minutes before trying again.`);
       return shutdown();
     }
 
@@ -186,11 +197,12 @@ async function main() {
   do {
     await new Promise((resolve) => {
       resolver = resolve;
+      console.debug('Waking up...');
       pollFeed(agent, redis, key, did)
         .then(() => setTimeout(() => resolve(true), POLLING_FREQ_SECONDS * 1000))
         .then(timeoutHandle => (pollFeedHandle = timeoutHandle))
         .catch((error) => {
-          console.log(`pollFeed errored: ${error}`);
+          console.error(`pollFeed errored: ${error}`);
           console.error(error);
         })
     });
