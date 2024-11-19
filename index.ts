@@ -96,12 +96,9 @@ async function pollFeed(agent: AtpAgent, redis: Redis, key: webcrypto.CryptoKey,
       embedText = embed.text;
     }
     else if (record?.embed?.['$type'] === 'app.bsky.embed.record' && embed['$type'] === 'app.bsky.embed.record#view') {
-      const {
-        record: {
-          author: { handle, displayName },
-          value: { createdAt, text },
-        },
-      } = embed;
+      const { handle, displayName } = embed.record.author ?? embed.record.creator;
+      const createdAt = embed.record.value?.createdAt ?? embed.record.record?.createdAt;
+      const text = embed.record.value?.text ?? embed.record.record?.description;
       embedRecords.push(`"${text}" -- @${handle} / ${displayName} at ${createdAt}`);
     }
 
@@ -165,7 +162,7 @@ const waitMins = (headers: { [key: string]: string }): number =>
 async function agentSessionWasRefreshed(redis: Redis, event: AtpSessionEvent, session: AtpSessionData | undefined) {
   if (event === 'update') {
     if (!session) {
-      console.error(`Updated event but no session!`);
+      console.error(`Update event but no session!`);
       return;
     }
 
