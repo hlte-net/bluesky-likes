@@ -3,13 +3,20 @@ import { input } from '@inquirer/prompts';
 import { Redis } from 'ioredis';
 import { webcrypto } from 'node:crypto';
 import { writeFile } from 'fs/promises';
-import { getKey, hlteFetch, HLTEPostPayload } from './hlte';
+import { importKeyFromHexString, hlteFetch } from 'hlte-fetch';
 import logger from './logger';
 logger('bluesky-likes');
 
 const POLLING_FREQ_SECONDS = Number.parseInt(process.env.BSKYHLTE_POLLING_FREQ_SECONDS ?? '67');
 const REDIS_SET_NAME = "hlte:bluesky-likes:processed-uris";
 const REDIS_SESSION_NAME = "hlte:bluesky-likes:saved-session";
+
+type HLTEPostPayload = {
+  uri: string,
+  data: string,
+  annotation?: string,
+  secondaryURI?: string,
+};
 
 async function login(agent: AtpAgent, redis: Redis): Promise<string> {
   async function loginImpl(): Promise<ComAtprotoServerCreateSession.Response> {
@@ -112,7 +119,6 @@ async function pollFeed(agent: AtpAgent, redis: Redis, key: webcrypto.CryptoKey,
 
   console.debug(`Full likes feed has ${allData.length} entries`);
 
-  let newEntries = 0;
   for (const entry of xformed) {
     if (!(await redis.sismember(REDIS_SET_NAME, entry.uri))) {
       const { userUrl, text, handle, displayName, createdAt,
@@ -147,13 +153,8 @@ async function pollFeed(agent: AtpAgent, redis: Redis, key: webcrypto.CryptoKey,
       }
 
       await redis.sadd(REDIS_SET_NAME, entry.uri);
-      newEntries++;
-      console.log(`Added ${userUrl}`);
+      console.log(`Processed ${userUrl}`);
     }
-  }
-
-  if (newEntries) {
-    console.log(`Processed ${newEntries} new likes`);
   }
 }
 
@@ -176,7 +177,7 @@ async function main() {
   let pollFeedHandle: NodeJS.Timeout;
   let resolver = (_) => { };
   let handle: string;
-  const key = await getKey();
+  const key = await importKeyFromHexString(process.env.HLTE_USER_KEY);
   const redis = new Redis(process.env.REDIS_URL);
   const agent = new AtpAgent({
     service: 'https://bsky.social',
