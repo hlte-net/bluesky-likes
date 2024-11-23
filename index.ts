@@ -5,11 +5,15 @@ import { webcrypto } from 'node:crypto';
 import { writeFile } from 'fs/promises';
 import { importKeyFromHexString, hlteFetch } from 'hlte-fetch';
 import logger from './logger';
-logger('bluesky-likes');
+
+const IDENT = process.env.BLUESKY_IDENT;
+const START_TS = Date.now();
+logger(`bluesky-likes_${IDENT}`);
 
 const POLLING_FREQ_SECONDS = Number.parseInt(process.env.BSKYHLTE_POLLING_FREQ_SECONDS ?? '67');
-const REDIS_SET_NAME = "hlte:bluesky-likes:processed-uris";
-const REDIS_SESSION_NAME = "hlte:bluesky-likes:saved-session";
+const THREAD_MAX_FETCH_DEPTH = Number.parseInt(process.env.BSKYHLTE_THREAD_MAX_FETCH_DEPTH ?? '25');
+const REDIS_SET_NAME = `hlte:bluesky-likes:${IDENT}:processed-uris`;
+const REDIS_SESSION_NAME = `hlte:bluesky-likes:${IDENT}:saved-session`;
 
 type HLTEPostPayload = {
   uri: string,
@@ -21,7 +25,7 @@ type HLTEPostPayload = {
 async function login(agent: AtpAgent, redis: Redis): Promise<string> {
   async function loginImpl(): Promise<ComAtprotoServerCreateSession.Response> {
     const params = {
-      identifier: process.env.BLUESKY_IDENT as string,
+      identifier: IDENT as string,
       password: process.env.BLUESKY_PASS as string,
       authFactorToken: undefined
     };
@@ -38,7 +42,7 @@ async function login(agent: AtpAgent, redis: Redis): Promise<string> {
     }
   }
 
-  console.log(`Authenticating as @${process.env.BLUESKY_IDENT}...`);
+  console.log(`Authenticating as @${IDENT}...`);
   const savedSession = await redis.get(REDIS_SESSION_NAME);
   if (savedSession) {
     try {
@@ -58,7 +62,87 @@ async function login(agent: AtpAgent, redis: Redis): Promise<string> {
   return response.data.handle;
 }
 
-async function pollFeed(agent: AtpAgent, redis: Redis, key: webcrypto.CryptoKey, actor: string): Promise<void> {
+function transformFeed(allData) {
+  return allData.map(({
+    post: {
+      uri,
+      author: { handle, displayName },
+      record,
+      embed
+    } }) => {
+    const [, type, urlId] = uri.slice('at://'.length).split('/');
+
+    if (type !== 'app.bsky.feed.post') {
+      throw new Error(`Unknown post type "${type}" for ${uri}`);
+    }
+
+    let embedImages = [];
+    let embedText;
+    let embedRecords = [];
+    const recEmbType = record?.embed?.['$type'];
+
+    if (recEmbType === 'app.bsky.embed.images' && embed['$type'] === 'app.bsky.embed.images#view') {
+      embedImages = embed.images.map(({ fullsize }) => fullsize);
+      embedText = embed.text;
+    }
+
+    if (recEmbType === 'app.bsky.embed.recordWithMedia' && embed['$type'] === 'app.bsky.embed.recordWithMedia#view') {
+      if (embed.media['$type'] === 'app.bsky.embed.external#view') {
+        const { description, thumb } = embed.media.external;
+        embedImages = [thumb];
+        embedText = description;
+      }
+      else {
+        embedImages = embed.media.images.map(({ fullsize }) => fullsize);
+        embedText = record.embed.media.images?.[0].alt ?? "";
+      }
+    }
+
+    if ((recEmbType === 'app.bsky.embed.record' && embed['$type'] === 'app.bsky.embed.record#view') ||
+      (recEmbType === 'app.bsky.embed.recordWithMedia' && embed['$type'] === 'app.bsky.embed.recordWithMedia#view')) {
+      const { handle, displayName } = (embed.record.author ?? embed.record.record?.author) ?? embed.record.creator;
+      const createdAt = embed.record.value?.createdAt ?? (embed.record.record?.createdAt ?? embed.record.record?.value?.createdAt);
+      const text = (embed.record.value?.text ?? embed.record?.record?.value?.text) ?? embed.record.record?.description;
+      embedRecords.push(`"${text}" -- @${handle} / ${displayName} at ${createdAt}`);
+    }
+
+    if (recEmbType === 'app.bsky.embed.external' && embed['$type'] === 'app.bsky.embed.external#view') {
+      const { title, description } = embed.external;
+      embedRecords.push(`"'${title}' -- ${description}" -- @${handle} / ${displayName} at ${record.createdAt}`);
+    }
+
+    if (recEmbType === 'app.bsky.embed.video' && embed['$type'] === 'app.bsky.embed.video#view') {
+      embedImages = [embed.thumbnail];
+    }
+
+    return {
+      uri, handle, displayName, text: (record as any).text,
+      embed, embedImages, embedText, embedRecords,
+      createdAt: (record as any).createdAt,
+      userUrl: `https://bsky.app/profile/${handle}/post/${urlId}`,
+    }
+  });
+}
+
+function repliesFromAuthor(postObj) {
+  const { post, replies } = postObj;
+  let returnReplies = [post.record];
+  const authorsChildren = replies.filter(({ post: { author: { did } } }) => did === post.author.did);
+
+  for (const aChild of authorsChildren) {
+    if (aChild?.replies?.length) {
+      returnReplies = returnReplies.concat(repliesFromAuthor(aChild));
+    }
+  }
+
+  return returnReplies.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
+function processThread(threadDataObj) {
+  return repliesFromAuthor(threadDataObj.thread);
+}
+
+async function pollFeed(agent: AtpAgent, redis: Redis, key: webcrypto.CryptoKey, actor: string, actorHandle: string): Promise<void> {
   let allData = [];
   let cursor = undefined;
   while (true) {
@@ -79,54 +163,21 @@ async function pollFeed(agent: AtpAgent, redis: Redis, key: webcrypto.CryptoKey,
 
   if (process.env.BSKYHLTE_DUMP_FEED) {
     // purposefully don't await (best effort)
-    writeFile("last_feed.json", JSON.stringify(allData, null, 2));
+    writeFile(`last-feed_${actorHandle}.json`, JSON.stringify(allData, null, 2));
   }
 
-  const xformed = allData.map(({
-    post: {
-      uri,
-      author: { handle, displayName },
-      record,
-      embed
-    } }) => {
-    const [, type, urlId] = uri.slice('at://'.length).split('/');
-
-    if (type !== 'app.bsky.feed.post') {
-      throw new Error(`Unknown post type "${type}" for ${uri}`);
-    }
-
-    let embedImages = [];
-    let embedText;
-    let embedRecords = [];
-    if (record?.embed?.['$type'] === 'app.bsky.embed.images' && embed['$type'] === 'app.bsky.embed.images#view') {
-      embedImages = embed.images.map(({ fullsize }) => fullsize);
-      embedText = embed.text;
-    }
-    else if (record?.embed?.['$type'] === 'app.bsky.embed.record' && embed['$type'] === 'app.bsky.embed.record#view') {
-      const { handle, displayName } = embed.record.author ?? embed.record.creator;
-      const createdAt = embed.record.value?.createdAt ?? embed.record.record?.createdAt;
-      const text = embed.record.value?.text ?? embed.record.record?.description;
-      embedRecords.push(`"${text}" -- @${handle} / ${displayName} at ${createdAt}`);
-    }
-
-    return {
-      uri, handle, displayName, text: (record as any).text,
-      embed, embedImages, embedText, embedRecords,
-      createdAt: (record as any).createdAt,
-      userUrl: `https://bsky.app/profile/${handle}/post/${urlId}`,
-    }
-  });
-
+  const xformed = transformFeed(allData);
   console.debug(`Full likes feed has ${allData.length} entries`);
 
   for (const entry of xformed) {
     if (!(await redis.sismember(REDIS_SET_NAME, entry.uri))) {
-      const { userUrl, text, handle, displayName, createdAt,
+      const { uri, userUrl, text, handle, displayName, createdAt,
         embedImages, embedText, embedRecords } = entry;
+
       const payload: HLTEPostPayload = {
         uri: userUrl,
         data: `${text}\n\n-- @${handle} / ${displayName}`,
-        annotation: `(from bluesky-likes, original post made at ${createdAt})\n`,
+        annotation: `(from @${actorHandle}'s bluesky-likes, original post made at ${createdAt})\n`,
       };
 
       if (embedImages.length) {
@@ -134,15 +185,32 @@ async function pollFeed(agent: AtpAgent, redis: Redis, key: webcrypto.CryptoKey,
         payload.secondaryURI = payload.uri;
         payload.uri = picked;
         if (embedText) {
-          payload.annotation += `\nEmbed text:\n"${embedText}"\n`;
+          payload.annotation += `\n** Embed text:\n"${embedText}"\n`;
         }
         if (rest.length) {
-          payload.annotation += `\nRemaining image embeds:\n${rest.join('\n')}\n`;
+          payload.annotation += `\n** Remaining image embeds:\n${rest.join('\n')}\n`;
         }
       }
 
       if (embedRecords.length) {
-        payload.annotation += `\nReposting:\n\n${embedRecords.join('\n---\n')}\n`;
+        payload.annotation += `\n** Reposting:\n\n${embedRecords.join('\n---\n')}\n`;
+      }
+
+      const children = processThread((await agent.getPostThread({
+        uri,
+        depth: THREAD_MAX_FETCH_DEPTH
+      })).data);
+
+      if (children.length > 1) {
+        // slice at index 1 because the first element is the OG post, but keeping it like that allows
+        // the code in repliesFromAuthor *much* simpler, so is a big win overall
+        payload.annotation += `** OP's remaining thread:\n` + children.slice(1).map(({ text }) => text).join('\n') + '\n';
+      }
+
+      if (process.env.BSKYHLTE_NO_PROCESSING) {
+        await writeFile(`${uri.split('/').slice(-1)[0]}.chidren.json`, JSON.stringify(children, null, 2));
+        console.log(payload);
+        continue;
       }
 
       const response = await hlteFetch(process.env.HLTE_USER_URL, key, payload);
@@ -153,14 +221,14 @@ async function pollFeed(agent: AtpAgent, redis: Redis, key: webcrypto.CryptoKey,
       }
 
       await redis.sadd(REDIS_SET_NAME, entry.uri);
-      console.log(`Processed ${userUrl}`);
+      console.debug(response);
+      console.log(`Posted ~${JSON.stringify(payload).length} bytes for ${userUrl}`);
     }
   }
 }
 
 const waitMins = (headers: { [key: string]: string }): number =>
   Number(((Number.parseInt(headers['ratelimit-reset']) * 1000) - Number(new Date())) / 1000 / 60);
-
 async function agentSessionWasRefreshed(redis: Redis, event: AtpSessionEvent, session: AtpSessionData | undefined) {
   if (event === 'update') {
     if (!session) {
@@ -169,28 +237,29 @@ async function agentSessionWasRefreshed(redis: Redis, event: AtpSessionEvent, se
     }
 
     await redis.set(REDIS_SESSION_NAME, JSON.stringify(session));
-    console.log('Session updated & saved');
+    console.log(`Session updated & saved. Uptime: ~${Number((Date.now() - START_TS) / 1000 / 60).toFixed(0)} minutes.`);
   }
 }
 
+
+let pollFeedHandle: NodeJS.Timeout;
+let resolver = (_) => { };
+const redis = new Redis(process.env.REDIS_URL);
+function shutdown() {
+  console.log('Ending...');
+  redis.disconnect();
+  clearTimeout(pollFeedHandle);
+  resolver((pollFeedHandle = null));
+  console.log('Done.');
+}
+
 async function main() {
-  let pollFeedHandle: NodeJS.Timeout;
-  let resolver = (_) => { };
   let handle: string;
   const key = await importKeyFromHexString(process.env.HLTE_USER_KEY);
-  const redis = new Redis(process.env.REDIS_URL);
   const agent = new AtpAgent({
     service: 'https://bsky.social',
     persistSession: agentSessionWasRefreshed.bind(null, redis),
   });
-
-  function shutdown() {
-    console.log('Ending...');
-    redis.disconnect();
-    clearTimeout(pollFeedHandle);
-    resolver((pollFeedHandle = null));
-    console.log('Done.');
-  }
 
   try {
     handle = await login(agent, redis);
@@ -212,15 +281,40 @@ async function main() {
     await new Promise((resolve) => {
       resolver = resolve;
       console.debug('Waking up...');
-      pollFeed(agent, redis, key, did)
+      pollFeed(agent, redis, key, did, handle)
         .then(() => setTimeout(() => resolve(true), POLLING_FREQ_SECONDS * 1000))
         .then(timeoutHandle => (pollFeedHandle = timeoutHandle))
-        .catch((error) => {
-          console.error(`pollFeed errored: ${error}`);
-          console.error(error);
-        })
+        .then(() => {
+          if (process.env.BSKYHLTE_NO_PROCESSING) {
+            console.log('BSKYHLTE_NO_PROCESSING is set; ending after one iteration');
+            shutdown();
+          }
+        });
     });
   } while (pollFeedHandle);
 }
 
-main();
+if (require.main === module) {
+  (async () => {
+    // this extra, and admitedly ugly, catch loop is here because certain (fetch-related) failure modes
+    // of the AtpAgent appears to cause it to become invalid and unable to perform further actions. so we
+    // just completely reset it (by re-invoking main() entirely) to clear those errors and move on automatically 
+    do {
+      try {
+        await main();
+      } catch (error) {
+        console.error(`pollFeed errored: ${error}`);
+        console.error(error);
+        console.error('Restarting...');
+        pollFeedHandle = null;
+        resolver = () => { };
+      }
+    } while (pollFeedHandle);
+  })();
+}
+else {
+  module.exports = {
+    transformFeed,
+    processThread,
+  };
+}
