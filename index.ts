@@ -62,66 +62,73 @@ async function login(agent: AtpAgent, redis: Redis): Promise<string> {
   return response.data.handle;
 }
 
+function transformSingle({
+  post: {
+    uri,
+    author: { handle, displayName },
+    record,
+    embed
+  } }) {
+  const [, type, urlId] = uri.slice('at://'.length).split('/');
+
+  if (type !== 'app.bsky.feed.post') {
+    throw new Error(`Unknown post type "${type}" for ${uri}`);
+  }
+
+  let embedImages = [];
+  let embedText;
+  let embedRecords = [];
+  const recEmbType = record?.embed?.['$type'];
+
+  if (recEmbType === 'app.bsky.embed.images' && embed['$type'] === 'app.bsky.embed.images#view') {
+    embedImages = embed.images.map(({ fullsize }) => fullsize);
+    embedText = embed.text;
+  }
+
+  if (recEmbType === 'app.bsky.embed.recordWithMedia' && embed['$type'] === 'app.bsky.embed.recordWithMedia#view') {
+    if (embed.media['$type'] === 'app.bsky.embed.external#view') {
+      const { description, thumb } = embed.media.external;
+      embedImages = [thumb];
+      embedText = description;
+    }
+    else {
+      embedImages = embed.media.images.map(({ fullsize }) => fullsize);
+      embedText = record.embed.media.images?.[0].alt ?? "";
+    }
+  }
+
+  if ((recEmbType === 'app.bsky.embed.record' && embed['$type'] === 'app.bsky.embed.record#view') ||
+    (recEmbType === 'app.bsky.embed.recordWithMedia' && embed['$type'] === 'app.bsky.embed.recordWithMedia#view')) {
+    const { handle, displayName } = (embed.record.author ?? embed.record.record?.author) ?? embed.record.creator;
+    const createdAt = embed.record.value?.createdAt ?? (embed.record.record?.createdAt ?? embed.record.record?.value?.createdAt);
+    const text = (embed.record.value?.text ?? embed.record?.record?.value?.text) ?? embed.record.record?.description;
+    embedRecords.push(`"${text}" -- @${handle} / ${displayName} at ${createdAt}`);
+
+    if (embed.record.embeds?.length) {
+      embedImages = embed.record.embeds.reduce((a, { images }) =>
+        ([...a, ...(images?.map(({ fullsize }) => fullsize) ?? [])]), []);
+    }
+  }
+
+  if (recEmbType === 'app.bsky.embed.external' && embed['$type'] === 'app.bsky.embed.external#view') {
+    const { title, description } = embed.external;
+    embedRecords.push(`"'${title}' -- ${description}" -- @${handle} / ${displayName} at ${record.createdAt}`);
+  }
+
+  if (recEmbType === 'app.bsky.embed.video' && embed['$type'] === 'app.bsky.embed.video#view') {
+    embedImages = [embed.thumbnail];
+  }
+
+  return {
+    uri, handle, displayName, text: (record as any).text,
+    embed, embedImages, embedText, embedRecords,
+    createdAt: (record as any).createdAt,
+    userUrl: `https://bsky.app/profile/${handle}/post/${urlId}`,
+  }
+}
+
 function transformFeed(allData) {
-  return allData.map(({
-    post: {
-      uri,
-      author: { handle, displayName },
-      record,
-      embed
-    } }) => {
-    const [, type, urlId] = uri.slice('at://'.length).split('/');
-
-    if (type !== 'app.bsky.feed.post') {
-      throw new Error(`Unknown post type "${type}" for ${uri}`);
-    }
-
-    let embedImages = [];
-    let embedText;
-    let embedRecords = [];
-    const recEmbType = record?.embed?.['$type'];
-
-    if (recEmbType === 'app.bsky.embed.images' && embed['$type'] === 'app.bsky.embed.images#view') {
-      embedImages = embed.images.map(({ fullsize }) => fullsize);
-      embedText = embed.text;
-    }
-
-    if (recEmbType === 'app.bsky.embed.recordWithMedia' && embed['$type'] === 'app.bsky.embed.recordWithMedia#view') {
-      if (embed.media['$type'] === 'app.bsky.embed.external#view') {
-        const { description, thumb } = embed.media.external;
-        embedImages = [thumb];
-        embedText = description;
-      }
-      else {
-        embedImages = embed.media.images.map(({ fullsize }) => fullsize);
-        embedText = record.embed.media.images?.[0].alt ?? "";
-      }
-    }
-
-    if ((recEmbType === 'app.bsky.embed.record' && embed['$type'] === 'app.bsky.embed.record#view') ||
-      (recEmbType === 'app.bsky.embed.recordWithMedia' && embed['$type'] === 'app.bsky.embed.recordWithMedia#view')) {
-      const { handle, displayName } = (embed.record.author ?? embed.record.record?.author) ?? embed.record.creator;
-      const createdAt = embed.record.value?.createdAt ?? (embed.record.record?.createdAt ?? embed.record.record?.value?.createdAt);
-      const text = (embed.record.value?.text ?? embed.record?.record?.value?.text) ?? embed.record.record?.description;
-      embedRecords.push(`"${text}" -- @${handle} / ${displayName} at ${createdAt}`);
-    }
-
-    if (recEmbType === 'app.bsky.embed.external' && embed['$type'] === 'app.bsky.embed.external#view') {
-      const { title, description } = embed.external;
-      embedRecords.push(`"'${title}' -- ${description}" -- @${handle} / ${displayName} at ${record.createdAt}`);
-    }
-
-    if (recEmbType === 'app.bsky.embed.video' && embed['$type'] === 'app.bsky.embed.video#view') {
-      embedImages = [embed.thumbnail];
-    }
-
-    return {
-      uri, handle, displayName, text: (record as any).text,
-      embed, embedImages, embedText, embedRecords,
-      createdAt: (record as any).createdAt,
-      userUrl: `https://bsky.app/profile/${handle}/post/${urlId}`,
-    }
-  });
+  return allData.map(transformSingle);
 }
 
 function repliesFromAuthor(postObj) {
