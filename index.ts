@@ -67,7 +67,8 @@ function transformSingle({
     uri,
     author: { handle, displayName },
     record,
-    embed
+    embed,
+    replyCount,
   } }) {
   const [, type, urlId] = uri.slice('at://'.length).split('/');
 
@@ -122,7 +123,7 @@ function transformSingle({
   return {
     uri, handle, displayName, text: (record as any).text,
     embed, embedImages, embedText, embedRecords,
-    createdAt: (record as any).createdAt,
+    createdAt: (record as any).createdAt, replyCount,
     userUrl: `https://bsky.app/profile/${handle}/post/${urlId}`,
   }
 }
@@ -133,11 +134,12 @@ function transformFeed(allData) {
 
 function repliesFromAuthor(postObj) {
   const { post, replies } = postObj;
-  let returnReplies = [post.record];
+  let returnReplies = [];
   const authorsChildren = replies.filter(({ post: { author: { did } } }) => did === post.author.did);
 
   for (const aChild of authorsChildren) {
-    if (aChild?.replies?.length) {
+    returnReplies = [...returnReplies, aChild.post.record];
+    if (aChild.replies?.length) {
       returnReplies = returnReplies.concat(repliesFromAuthor(aChild));
     }
   }
@@ -179,7 +181,7 @@ async function pollFeed(agent: AtpAgent, redis: Redis, key: webcrypto.CryptoKey,
   for (const entry of xformed) {
     if (!(await redis.sismember(REDIS_SET_NAME, entry.uri))) {
       const { uri, userUrl, text, handle, displayName, createdAt,
-        embedImages, embedText, embedRecords } = entry;
+        embedImages, embedText, embedRecords, replyCount } = entry;
 
       const payload: HLTEPostPayload = {
         uri: userUrl,
@@ -203,20 +205,26 @@ async function pollFeed(agent: AtpAgent, redis: Redis, key: webcrypto.CryptoKey,
         payload.annotation += `\n** Reposting:\n\n${embedRecords.join('\n---\n')}\n`;
       }
 
-      const children = processThread((await agent.getPostThread({
-        uri,
-        depth: THREAD_MAX_FETCH_DEPTH
-      })).data);
+      if (replyCount > 0) {
+        const childData = (await agent.getPostThread({
+          uri,
+          depth: Math.max(replyCount, THREAD_MAX_FETCH_DEPTH)
+        })).data;
 
-      if (children.length > 1) {
-        // slice at index 1 because the first element is the OG post, but keeping it like that allows
-        // the code in repliesFromAuthor *much* simpler, so is a big win overall
-        payload.annotation += `** OP's remaining thread:\n` + children.slice(1).map(({ text }) => text).join('\n') + '\n';
+        const children = processThread(childData);
+        payload.annotation += `** OP's remaining thread:\n` + children.map(({ text }) => text).join('\n') + '\n';
+        
+        if (children.length !== replyCount) {
+          console.warn('children counts should match!', children.length, replyCount);
+        }
+
+        if (process.env.BSKYHLTE_NO_PROCESSING) {
+          await writeFile(`${uri.split('/').slice(-1)[0]}.threadData.json`, JSON.stringify(childData, null, 2));
+          console.log(payload);
+        }
       }
 
       if (process.env.BSKYHLTE_NO_PROCESSING) {
-        await writeFile(`${uri.split('/').slice(-1)[0]}.chidren.json`, JSON.stringify(children, null, 2));
-        console.log(payload);
         continue;
       }
 
