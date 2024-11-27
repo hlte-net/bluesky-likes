@@ -212,10 +212,8 @@ async function pollFeed(agent: AtpAgent, redis: Redis, key: webcrypto.CryptoKey,
         })).data;
 
         const children = processThread(childData);
-        payload.annotation += `** OP's remaining thread:\n` + children.map(({ text }) => text).join('\n') + '\n';
-        
-        if (children.length !== replyCount) {
-          console.warn('children counts should match!', children.length, replyCount);
+        if (children.length) {
+          payload.annotation += `** OP's remaining thread:\n` + children.map(({ text }) => text).join('\n') + '\n';
         }
 
         if (process.env.BSKYHLTE_NO_PROCESSING) {
@@ -293,7 +291,7 @@ async function main() {
   ['SIGINT', 'SIGHUP', 'SIGTERM'].forEach((signal) => process.on(signal, shutdown));
 
   do {
-    await new Promise((resolve) => {
+    await new Promise((resolve, reject) => {
       resolver = resolve;
       console.debug('Waking up...');
       pollFeed(agent, redis, key, did, handle)
@@ -304,7 +302,8 @@ async function main() {
             console.log('BSKYHLTE_NO_PROCESSING is set; ending after one iteration');
             shutdown();
           }
-        });
+        })
+        .catch(reject);
     });
   } while (pollFeedHandle);
 }
