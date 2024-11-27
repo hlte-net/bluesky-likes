@@ -11,7 +11,7 @@ const START_TS = Date.now();
 logger(`bluesky-likes_${IDENT}`);
 
 const POLLING_FREQ_SECONDS = Number.parseInt(process.env.BSKYHLTE_POLLING_FREQ_SECONDS ?? '67');
-const THREAD_MAX_FETCH_DEPTH = Number.parseInt(process.env.BSKYHLTE_THREAD_MAX_FETCH_DEPTH ?? '25');
+const THREAD_MAX_FETCH_DEPTH = Number.parseInt(process.env.BSKYHLTE_THREAD_MAX_FETCH_DEPTH ?? '100');
 const REDIS_SET_NAME = `hlte:bluesky-likes:${IDENT}:processed-uris`;
 const REDIS_SESSION_NAME = `hlte:bluesky-likes:${IDENT}:saved-session`;
 
@@ -208,7 +208,7 @@ async function pollFeed(agent: AtpAgent, redis: Redis, key: webcrypto.CryptoKey,
       if (replyCount > 0) {
         const childData = (await agent.getPostThread({
           uri,
-          depth: Math.max(replyCount, THREAD_MAX_FETCH_DEPTH)
+          depth: Math.min(replyCount, THREAD_MAX_FETCH_DEPTH)
         })).data;
 
         const children = processThread(childData);
@@ -303,28 +303,16 @@ async function main() {
             shutdown();
           }
         })
-        .catch(reject);
+        .catch((error) => {
+          console.error(`pollFeed errored: ${error}`);
+          reject(error);
+        })
     });
   } while (pollFeedHandle);
 }
 
 if (require.main === module) {
-  (async () => {
-    // this extra, and admitedly ugly, catch loop is here because certain (fetch-related) failure modes
-    // of the AtpAgent appears to cause it to become invalid and unable to perform further actions. so we
-    // just completely reset it (by re-invoking main() entirely) to clear those errors and move on automatically 
-    do {
-      try {
-        await main();
-      } catch (error) {
-        console.error(`pollFeed errored: ${error}`);
-        console.error(error);
-        console.error('Restarting...');
-        pollFeedHandle = null;
-        resolver = () => { };
-      }
-    } while (pollFeedHandle);
-  })();
+  main();
 }
 else {
   module.exports = {
