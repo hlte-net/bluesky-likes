@@ -83,7 +83,7 @@ function transformSingle({
 
   if (recEmbType === 'app.bsky.embed.images' && embed['$type'] === 'app.bsky.embed.images#view') {
     embedImages = embed.images.map(({ fullsize }) => fullsize);
-    embedText = embed.text;
+    embedText = embed.text + '\nAlt texts: "' + embed.images.map(({ alt }) => alt).join('", "');
   }
 
   if (recEmbType === 'app.bsky.embed.recordWithMedia' && embed['$type'] === 'app.bsky.embed.recordWithMedia#view') {
