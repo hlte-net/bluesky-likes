@@ -94,7 +94,7 @@ function transformSingle({
         embedText = description;
       }
       else {
-        embedImages = embed.media.images.map(({ fullsize }) => fullsize);
+        embedImages = embed.media.images?.map(({ fullsize }) => fullsize);
         embedText = record.embed.media.images?.[0].alt ?? "";
       }
     }
@@ -120,9 +120,7 @@ function transformSingle({
     if (recEmbType === 'app.bsky.embed.video' && embed['$type'] === 'app.bsky.embed.video#view') {
       embedImages = [embed.thumbnail];
     }
-  } else {
-    console.warn(`Liked post has lost embeds!`, embed, record, handle, displayName, uri);
-  }
+  } 
 
   return {
     uri, handle, displayName, text: (record as any).text,
@@ -139,7 +137,7 @@ function transformFeed(allData) {
 function repliesFromAuthor(postObj) {
   const { post, replies } = postObj;
   let returnReplies = [];
-  const authorsChildren = replies.filter(({ post: { author: { did } } }) => did === post.author.did);
+  const authorsChildren = replies.filter((fPost) => fPost?.author?.did === post?.author?.did);
 
   for (const aChild of authorsChildren) {
     returnReplies = [...returnReplies, aChild.post.record];
@@ -193,7 +191,7 @@ async function pollFeed(agent: AtpAgent, redis: Redis, key: webcrypto.CryptoKey,
         annotation: `(from @${actorHandle}'s bluesky-likes, original post made at ${createdAt})\n`,
       };
 
-      if (embedImages.length) {
+      if (embedImages?.length) {
         const [picked, ...rest] = embedImages;
         payload.secondaryURI = payload.uri;
         payload.uri = picked;
@@ -205,7 +203,7 @@ async function pollFeed(agent: AtpAgent, redis: Redis, key: webcrypto.CryptoKey,
         }
       }
 
-      if (embedRecords.length) {
+      if (embedRecords?.length) {
         payload.annotation += `\n** Reposting:\n\n${embedRecords.join('\n---\n')}\n`;
       }
 
@@ -234,7 +232,8 @@ async function pollFeed(agent: AtpAgent, redis: Redis, key: webcrypto.CryptoKey,
 
       if (response.status !== 204) {
         console.error(response);
-        throw new Error(`bad hlte fetch: ${response.status} ${response.statusText}`);
+        console.error(`bad hlte fetch: ${response.status} ${response.statusText}`);
+        continue;
       }
 
       await redis.sadd(REDIS_SET_NAME, entry.uri);
