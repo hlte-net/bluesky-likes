@@ -101,14 +101,18 @@ function transformSingle({
 
     if ((recEmbType === 'app.bsky.embed.record' && embed['$type'] === 'app.bsky.embed.record#view') ||
       (recEmbType === 'app.bsky.embed.recordWithMedia' && embed['$type'] === 'app.bsky.embed.recordWithMedia#view')) {
-      const { handle, displayName } = (embed.record.author ?? embed.record.record?.author) ?? embed.record.creator;
-      const createdAt = embed.record.value?.createdAt ?? (embed.record.record?.createdAt ?? embed.record.record?.value?.createdAt);
-      const text = (embed.record.value?.text ?? embed.record?.record?.value?.text) ?? embed.record.record?.description;
-      embedRecords.push(`"${text}" -- @${handle} / ${displayName} at ${createdAt}`);
+      try {
+        const { handle, displayName } = (embed.record.author ?? embed.record.record?.author) ?? embed.record.creator;
+        const createdAt = embed.record.value?.createdAt ?? (embed.record.record?.createdAt ?? embed.record.record?.value?.createdAt);
+        const text = (embed.record.value?.text ?? embed.record?.record?.value?.text) ?? embed.record.record?.description;
+        embedRecords.push(`"${text}" -- @${handle} / ${displayName} at ${createdAt}`);
 
-      if (embed.record.embeds?.length) {
-        embedImages = embed.record.embeds.reduce((a, { images }) =>
-          ([...a, ...(images?.map(({ fullsize }) => fullsize) ?? [])]), []);
+        if (embed.record.embeds?.length) {
+          embedImages = embed.record.embeds.reduce((a, { images }) =>
+            ([...a, ...(images?.map(({ fullsize }) => fullsize) ?? [])]), []);
+        }
+      } catch (e) {
+        console.error(`Failure handling record type ${recEmbType}`, e);
       }
     }
 
